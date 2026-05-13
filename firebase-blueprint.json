@@ -111,6 +111,11 @@
       "description": "Global application configurations.",
       "type": "object",
       "properties": {
+        "adminEmails": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Emails that have admin access"
+        },
         "backupEmail": { "type": "string", "format": "email", "description": "Email to receive copies of anamnesis" },
         "fees": {
           "type": "object",
@@ -209,6 +214,34 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["name"]
+    },
+    "Feedback": {
+      "title": "Feedback",
+      "description": "Client post-treatment evaluation.",
+      "type": "object",
+      "properties": {
+        "appointmentId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "professionalId": { "type": "string" },
+        "professionalName": { "type": "string" },
+        "rating": { "type": "number", "minimum": 1, "maximum": 5 },
+        "comment": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["appointmentId", "rating"]
+    },
+    "ProfessionalTransaction": {
+      "title": "Professional Transaction",
+      "description": "Finance record for professional.",
+      "type": "object",
+      "properties": {
+        "professionalId": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "status": { "type": "string" }
+      }
     }
   },
   "firestore": {
@@ -251,6 +284,10 @@
     "professional_transactions": {
       "schema": "ProfessionalTransaction",
       "description": "Payments and advances for professionals"
+    },
+    "feedbacks": {
+      "schema": "Feedback",
+      "description": "Client post-treatment feedback"
     }
   }
 }

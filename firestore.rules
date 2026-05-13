@@ -15,52 +15,73 @@ service cloud.firestore {
       return request.auth.token.email_verified == true;
     }
 
-    // Since this is a private management app for the clinic owner/staff
-    // We strictly allow access only to authenticated and verified users.
-    // In a real scenario, we might want to check for a specific email or role.
+    function isAdmin() {
+      let isMaster = isSignedIn() && isEmailVerified() && request.auth.token.email == 'kupferman47@gmail.com';
+      let docExists = exists(/databases/$(database)/documents/settings/global);
+      let settingsData = docExists ? get(/databases/$(database)/documents/settings/global).data : null;
+      let isConfigured = docExists && settingsData.keys().hasAll(['adminEmails']) && request.auth.token.email in settingsData.adminEmails;
+      return isMaster || (isSignedIn() && isEmailVerified() && isConfigured);
+    }
     
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     match /clients/{clientId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /anamnesis/{anamnesisId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /commands/{commandId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /settings/{settingId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /clients/{clientId}/evolution/{evolutionId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /professionals/{professionalId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow list, get: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /services_catalog/{serviceId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /appointments/{appointmentId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow update: if isSignedIn(); // Allow professionals to update status
+      allow create, delete: if isAdmin();
     }
 
     match /locations/{locationId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /professional_transactions/{transactionId} {
-      allow read, write: if isSignedIn() && isEmailVerified();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /feedbacks/{feedbackId} {
+      allow create: if true; // Clients send feedback anonymously or logged in
+      allow read: if isAdmin();
+      allow delete: if isAdmin();
     }
   }
 }

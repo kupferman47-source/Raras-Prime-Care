@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { db } from '../lib/firebase';
-import { collection, addDoc, serverTimestamp, setDoc, doc, getDoc, onSnapshot, query, orderBy } from 'firebase/firestore';
+import { db, auth, signInAnonymously } from '../lib/firebase';
+import { collection, addDoc, serverTimestamp, setDoc, doc, getDoc, onSnapshot, query, orderBy, updateDoc, where, getDocs, deleteDoc, writeBatch } from 'firebase/firestore';
 import { Input, Button } from './ui';
 import { cn, formatCurrency } from '../lib/utils';
 import { handleFirestoreError, OperationType } from '../lib/error-handler';
@@ -13,6 +13,7 @@ import {
   Camera, 
   UploadCloud, 
   X, 
+  XCircle,
   User as UserIcon, 
   Briefcase,
   ClipboardList,
@@ -21,15 +22,89 @@ import {
   Clock,
   ExternalLink,
   MapPin,
-  DollarSign
+  DollarSign,
+  Zap,
+  UserPlus
 } from 'lucide-react';
 import SignatureCanvas from 'react-signature-canvas';
 import * as XLSX from 'xlsx';
 
-// --- Excel Import Component ---
-export function ExcelImporter({ onImported }: { onImported: () => void }) {
+import * as pdfjsLib from 'pdfjs-dist';
+import { GoogleGenAI, Type } from "@google/genai";
+
+// Initialize PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+
+// --- Client Importer Component ---
+export function ClientImporter({ onImported }: { onImported: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+    const pdf = await loadingTask.promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map((item: any) => item.str).join(' ');
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  };
+
+  const parseTextWithGemini = async (text: string, type: 'clients' | 'services'): Promise<any[]> => {
+    const systemInstruction = `Você é um extrator de dados estruturados. Extraia uma lista de ${type === 'clients' ? 'clientes' : 'serviços'} do texto fornecido.
+    Retorne APENAS um array JSON válido.
+    
+    Para clientes, as chaves devem ser: Nome, Celular, Telefone, "Data de Nascimento", Email, "Endereço", CPF, RG, CEP, Estado, Cidade, Bairro.
+    IMPORTANTE para "Data de Nascimento": Tente extrair no formato AAAA-MM-DD se possível. Se encontrar apenas dia e mês, use 1900 como ano padrão (ex: 1900-MM-DD).
+    
+    Para serviços, as chaves devem ser: Nome, "Preço Padrão", Categoria.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-1.5-flash",
+      contents: [{ parts: [{ text: `Texto para extrair:\n\n${text}` }] }],
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: type === 'clients' ? {
+              Nome: { type: Type.STRING },
+              Celular: { type: Type.STRING },
+              Telefone: { type: Type.STRING },
+              "Data de Nascimento": { type: Type.STRING },
+              Email: { type: Type.STRING },
+              "Endereço": { type: Type.STRING },
+              CPF: { type: Type.STRING },
+              RG: { type: Type.STRING },
+              CEP: { type: Type.STRING },
+              Estado: { type: Type.STRING },
+              Cidade: { type: Type.STRING },
+              Bairro: { type: Type.STRING },
+            } : {
+              Nome: { type: Type.STRING },
+              "Preço Padrão": { type: Type.NUMBER },
+              Categoria: { type: Type.STRING },
+            }
+          }
+        }
+      }
+    });
+
+    try {
+      return JSON.parse(response.text || '[]');
+    } catch (e) {
+      console.error('Erro ao parsear resposta do Gemini:', e);
+      return [];
+    }
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'clients' | 'services' | 'full_history') => {
     const file = e.target.files?.[0];
@@ -38,85 +113,217 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
     setLoading(true);
     setError(null);
 
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      try {
-        const bstr = evt.target?.result;
+    try {
+      const findRawValue = (row: any, aliases: string[]) => {
+        // Precise search first
+        for (const alias of aliases) {
+          if (row[alias] !== undefined && row[alias] !== null) {
+            const val = row[alias];
+            if (typeof val === 'string' && val.trim() === '') continue;
+            return val;
+          }
+        }
+        // Case-insensitive search second
+        const lowerAliases = aliases.map(a => a.toLowerCase().trim());
+        for (const key in row) {
+          if (lowerAliases.includes(key.toLowerCase().trim())) {
+            const val = row[key];
+            if (typeof val === 'string' && val.trim() === '') continue;
+            return val;
+          }
+        }
+        return '';
+      };
+
+      const findStringValue = (row: any, aliases: string[]) => {
+        const val = findRawValue(row, aliases);
+        return val ? String(val).trim() : '';
+      };
+
+      const parseDateString = (val: any): string => {
+        if (!val) return '';
+        if (val instanceof Date) return val.toISOString().split('T')[0];
         
-        let data: any[] = [];
-        if (file.name.endsWith('.json')) {
-          data = JSON.parse(bstr as string);
-        } else {
-          const wb = XLSX.read(bstr, { type: 'binary' });
-          const wsname = wb.SheetNames[0];
-          const ws = wb.Sheets[wsname];
-          data = XLSX.utils.sheet_to_json(ws);
+        let s = String(val).trim();
+        if (!s) return '';
+
+        // Handle YYYY-MM-DD
+        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.split('T')[0];
+
+        // Handle DD/MM/YYYY or DD/MM/YY
+        if (s.includes('/')) {
+          const parts = s.split('/');
+          if (parts.length === 3) {
+            const day = parts[0].padStart(2, '0');
+            const month = parts[1].padStart(2, '0');
+            let year = parts[2].trim();
+            if (year.length === 2) {
+              const numYear = parseInt(year);
+              year = numYear > 30 ? `19${year}` : `20${year}`;
+            }
+            return `${year}-${month}-${day}`;
+          }
+          if (parts.length === 2) {
+            // Assume birth year 1900 if only day/month provided
+            const day = parts[0].padStart(2, '0');
+            const month = parts[1].padStart(2, '0');
+            return `1900-${month}-${day}`;
+          }
         }
 
-        if (!Array.isArray(data)) throw new Error('Formato inválido. Deve ser um array.');
+        // Handle DD-MM-YYYY
+        if (s.includes('-') && !s.startsWith('20') && !s.startsWith('19')) {
+          const parts = s.split('-');
+          if (parts.length === 3) {
+            const day = parts[0].padStart(2, '0');
+            const month = parts[1].padStart(2, '0');
+            const year = parts[2].trim();
+            return `${year.length === 2 ? `20${year}` : year}-${month}-${day}`;
+          }
+        }
 
-        if (type === 'clients') {
-          for (const row of data) {
+        return s;
+      };
+
+      let data: any[] = [];
+      
+      if (file.name.endsWith('.json')) {
+        const reader = new FileReader();
+        const jsonText = await new Promise<string>((resolve) => {
+          reader.onload = (evt) => resolve(evt.target?.result as string);
+          reader.readAsText(file);
+        });
+        data = JSON.parse(jsonText);
+      } else if (file.name.endsWith('.pdf')) {
+        const pdfText = await extractTextFromPDF(file);
+        if (type === 'full_history') {
+          setError('Importação de histórico completo não disponível para PDF. Use JSON.');
+          setLoading(false);
+          return;
+        }
+        data = await parseTextWithGemini(pdfText, type as 'clients' | 'services');
+      } else {
+        const reader = new FileReader();
+        const bstr = await new Promise<string>((resolve) => {
+          reader.onload = (evt) => resolve(evt.target?.result as string);
+          reader.readAsBinaryString(file);
+        });
+        const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        data = XLSX.utils.sheet_to_json(ws);
+      }
+
+      if (!Array.isArray(data)) throw new Error('Formato inválido. Deve ser um array.');
+
+      if (type === 'clients') {
+        let importedCount = 0;
+        for (const row of data) {
+          const name = findStringValue(row, ['Nome', 'name', 'Nome Completo', 'CLIENTE', 'Cliente', 'NOME', 'FULLNAME', 'Fullname', 'Paciente', 'PACIENTE', 'NOM', 'Usuario', 'USUARIO', 'User']);
+          
+          if (!name || name === 'Sem Nome') continue;
+
+          const phone = findStringValue(row, ['Celular', 'CELULAR', 'MOBILE', 'Mobile', 'Cell', 'CELL', 'Telefone', 'TELEFONE', 'phone', 'TEL', 'Tel', 'Whatsapp', 'Contato', 'Fone', 'FONE', 'Telefone/Celular', 'Telefone / Celular', 'Celular/Telefone', 'Celular / Telefone']);
+          const email = findStringValue(row, ['Email', 'email', 'EMAIL', 'Mail', 'E-mail', 'Correio']);
+          let birthDateRaw = findRawValue(row, ['Data de Nascimento', 'birthDate', 'Nascimento', 'DATA NASCIMENTO', 'DATA DE NASCIMENTO', 'Aniversario', 'Birthdate', 'Birthday', 'NASCIMENTO', 'DN', 'Nasc', 'Data Nasc', 'Data de Nasc', 'Nasc.', 'Niver', 'Data de Aniversário']);
+          const address = findStringValue(row, ['Endereço', 'address', 'Endereco', 'ENDEREÇO', 'Moradia', 'Logradouro', 'Rua', 'Casa', 'End']);
+          let registrationDateRaw = findRawValue(row, ['Data de Registro', 'registrationDate', 'DATA DE REGISTRO', 'DATA REGISTRO', 'Registro', 'Created', 'Data', 'Data de Cadastro', 'DATA DE CADASTRO', 'Data Cadastro', 'Cadastro', 'DATACADASTRO']);
+          
+          const cpf = findStringValue(row, ['CPF', 'cpf', 'C.P.F']);
+          const rg = findStringValue(row, ['RG', 'rg', 'R.G']);
+          const cep = findStringValue(row, ['CEP', 'cep', 'C.E.P']);
+          const state = findStringValue(row, ['Estado', 'state', 'UF', 'U.F']);
+          const city = findStringValue(row, ['Cidade', 'city', 'Municipio']);
+          const neighborhood = findStringValue(row, ['Bairro', 'neighborhood', 'Distrito']);
+          
+          const birthDate = parseDateString(birthDateRaw);
+          const parsedRegDate = parseDateString(registrationDateRaw);
+          
+          let createdAtValue;
+          if (registrationDateRaw instanceof Date) {
+            createdAtValue = registrationDateRaw;
+          } else if (parsedRegDate) {
+            const dateObj = new Date(`${parsedRegDate}T12:00:00Z`);
+            createdAtValue = !isNaN(dateObj.getTime()) ? dateObj : serverTimestamp();
+          } else {
+            createdAtValue = serverTimestamp();
+          }
+          
+          try {
             await addDoc(collection(db, 'clients'), {
-              name: row.Nome || row.name || 'Sem Nome',
-              phone: String(row.Telefone || row.phone || ''),
-              email: row.Email || row.email || '',
-              birthDate: row['Data de Nascimento'] || row.birthDate || '',
-              address: row['Endereço'] || row.address || '',
-              createdAt: serverTimestamp()
+              name: name,
+              phone: phone,
+              email: email,
+              birthDate: birthDate,
+              address: address,
+              cpf: cpf,
+              rg: rg,
+              cep: cep,
+              state: state,
+              city: city,
+              neighborhood: neighborhood,
+              createdAt: createdAtValue
             });
+            importedCount++;
+          } catch (err) {
+            console.error('Failed to import row for client:', name, err);
           }
-        } else if (type === 'services') {
-          for (const row of data) {
-            await addDoc(collection(db, 'services_catalog'), {
-              name: row.Nome || row.name || 'Sem Nome',
-              defaultPrice: parseFloat(row['Preço Padrão'] || row.price || 0),
-              category: row.Categoria || row.category || 'Outros',
-              updatedAt: serverTimestamp()
-            });
-          }
-        } else if (type === 'full_history') {
-          for (const row of data) {
-            // Create Client
-            const clientRef = await addDoc(collection(db, 'clients'), {
-              name: row.name || row.Nome || 'Importado',
-              phone: String(row.phone || row.Telefone || ''),
-              email: row.email || row.Email || '',
-              birthDate: row.birthDate || row['Data de Nascimento'] || '',
-              address: row.address || row['Endereço'] || '',
-              createdAt: serverTimestamp()
-            });
+        }
+        alert(`Sucesso! ${importedCount} clientes foram importados.`);
+      } else if (type === 'services') {
+        for (const row of data) {
+          const name = row.Nome || row.name || row.SERVIÇO || row.Serviço || row.Procedimento || 'Sem Nome';
+          const price = row['Preço Padrão'] || row.price || row.Valor || row.Preço || row.PREÇO || 0;
+          const category = row.Categoria || row.category || row.CATEGORIA || 'Outros';
 
-            // Import History if exists
-            const history = row.history || row.historico;
-            if (Array.isArray(history)) {
-              for (const entry of history) {
-                await addDoc(collection(db, 'clients', clientRef.id, 'evolution'), {
-                  clientId: clientRef.id,
-                  date: entry.date ? new Date(entry.date) : new Date(),
-                  description: entry.description || entry.descricao || '',
-                  updatedAt: serverTimestamp()
-                });
-              }
+          await addDoc(collection(db, 'services_catalog'), {
+            name: String(name).trim(),
+            defaultPrice: parseFloat(String(price).replace(/[^\d.,]/g, '').replace(',', '.') || '0'),
+            category: String(category).trim(),
+            updatedAt: serverTimestamp()
+          });
+        }
+      } else if (type === 'full_history') {
+        for (const row of data) {
+          const name = row.name || row.Nome || row['Nome Completo'] || 'Importado';
+          const phone = row.phone || row.Telefone || row.Celular || '';
+          const email = row.email || row.Email || '';
+          const birthDate = row.birthDate || row['Data de Nascimento'] || '';
+          const address = row.address || row['Endereço'] || '';
+
+          // Create Client
+          const clientRef = await addDoc(collection(db, 'clients'), {
+            name: String(name).trim(),
+            phone: String(phone).trim(),
+            email: String(email).trim(),
+            birthDate: String(birthDate).trim(),
+            address: String(address).trim(),
+            createdAt: serverTimestamp()
+          });
+
+          // Import History if exists
+          const history = row.history || row.historico;
+          if (Array.isArray(history)) {
+            for (const entry of history) {
+              await addDoc(collection(db, 'clients', clientRef.id, 'evolution'), {
+                clientId: clientRef.id,
+                date: entry.date ? new Date(entry.date) : new Date(),
+                description: entry.description || entry.descricao || '',
+                updatedAt: serverTimestamp()
+              });
             }
           }
         }
-
-        alert(`Importação de ${type} concluída com sucesso!`);
-        onImported();
-      } catch (err) {
-        console.error('Erro na importação:', err);
-        setError('Falha ao processar arquivo. Verifique o formato, codificação e colunas.');
-      } finally {
-        setLoading(false);
-        e.target.value = '';
       }
-    };
 
-    if (file.name.endsWith('.json')) {
-      reader.readAsText(file);
-    } else {
-      reader.readAsBinaryString(file);
+      alert(`Importação de ${type} concluída com sucesso!`);
+      onImported();
+    } catch (err) {
+      console.error('Erro na importação:', err);
+      setError('Falha ao processar arquivo. Verifique o formato e permissões.');
+    } finally {
+      setLoading(false);
+      e.target.value = '';
     }
   };
 
@@ -129,12 +336,12 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
           </div>
           <div>
             <h4 className="font-bold text-slate-800">Importar Clientes</h4>
-            <p className="text-[10px] text-slate-400">XLSX com: Nome, Telefone...</p>
+            <p className="text-[10px] text-slate-400">Nome, Celular, Telefone, Data de Nascimento</p>
           </div>
         </div>
         <input 
           type="file" 
-          accept=".xlsx, .xls" 
+          accept=".xlsx, .xls, .csv, .pdf" 
           id="import-clients" 
           className="hidden" 
           onChange={(e) => handleFileUpload(e, 'clients')}
@@ -146,7 +353,7 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
           onClick={() => document.getElementById('import-clients')?.click()}
           disabled={loading}
         >
-          {loading ? 'Processando...' : 'Selecionar XLSX'}
+          {loading ? 'Processando...' : 'Selecionar Arquivo'}
         </Button>
       </div>
 
@@ -157,12 +364,12 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
           </div>
           <div>
             <h4 className="font-bold text-slate-800">Importar Catálogo</h4>
-            <p className="text-[10px] text-slate-400">XLSX com: Nome, Preço, Categoria</p>
+            <p className="text-[10px] text-slate-400">Excel (XLSX/CSV) ou PDF</p>
           </div>
         </div>
         <input 
           type="file" 
-          accept=".xlsx, .xls" 
+          accept=".xlsx, .xls, .csv, .pdf" 
           id="import-services" 
           className="hidden" 
           onChange={(e) => handleFileUpload(e, 'services')}
@@ -174,7 +381,7 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
           onClick={() => document.getElementById('import-services')?.click()}
           disabled={loading}
         >
-          {loading ? 'Processando...' : 'Selecionar XLSX'}
+          {loading ? 'Processando...' : 'Selecionar Arquivo'}
         </Button>
       </div>
 
@@ -185,7 +392,7 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
           </div>
           <div>
             <h4 className="font-bold text-slate-800">Histórico Completo</h4>
-            <p className="text-[10px] text-slate-400">JSON: name, phone, history[]</p>
+            <p className="text-[10px] text-slate-400">Apenas JSON: name, phone...</p>
           </div>
         </div>
         <input 
@@ -211,14 +418,23 @@ export function ExcelImporter({ onImported }: { onImported: () => void }) {
 }
 
 // --- Client Registration Form ---
-export function ClientForm({ onSuccess }: { onSuccess: () => void }) {
+export function ClientForm({ client, onSuccess }: { client?: Client, onSuccess: () => void }) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
-    name: '',
-    phone: '',
-    email: '',
-    birthDate: '',
-    address: '',
+    name: client?.name || '',
+    phone: client?.phone || '',
+    secondaryPhone: client?.secondaryPhone || '',
+    email: client?.email || '',
+    birthDate: client?.birthDate || '',
+    address: client?.address || '',
+    gender: client?.gender || 'Outro',
+    cpf: client?.cpf || '',
+    rg: client?.rg || '',
+    cep: client?.cep || '',
+    state: client?.state || '',
+    city: client?.city || '',
+    neighborhood: client?.neighborhood || '',
+    avatarUrl: client?.avatarUrl || '',
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -226,54 +442,188 @@ export function ClientForm({ onSuccess }: { onSuccess: () => void }) {
     setLoading(true);
     const path = 'clients';
     try {
-      await addDoc(collection(db, path), {
-        ...formData,
-        createdAt: serverTimestamp(),
-      });
+      if (client?.id) {
+        await updateDoc(doc(db, path, client.id), {
+          ...formData,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await addDoc(collection(db, path), {
+          ...formData,
+          createdAt: serverTimestamp(),
+        });
+      }
       onSuccess();
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
+      handleFirestoreError(error, client?.id ? OperationType.UPDATE : OperationType.CREATE, path);
     } finally {
       setLoading(false);
     }
   };
 
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // In a real app we'd upload to Storage. 
+    // Here we'll use a local data URL as a demo if requested or just allow setting the URL.
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      setFormData({ ...formData, avatarUrl: evt.target?.result as string });
+    };
+    reader.readAsDataURL(file);
+  };
+
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      <Input 
-        label="Nome Completo" 
-        required 
-        value={formData.name} 
-        onChange={e => setFormData({...formData, name: e.target.value})} 
-      />
-      <div className="grid grid-cols-2 gap-4">
+    <form onSubmit={handleSubmit} className="space-y-8">
+      <div className="flex flex-col md:flex-row gap-8">
+        {/* Photo Section */}
+        <div className="flex flex-col items-center gap-3">
+          <div className="relative group">
+            <div className="w-32 h-32 rounded-full bg-slate-100 border-4 border-white shadow-md overflow-hidden flex items-center justify-center">
+              {formData.avatarUrl ? (
+                <img src={formData.avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+              ) : (
+                <UserIcon size={48} className="text-slate-300" />
+              )}
+            </div>
+            <label className="absolute bottom-0 right-0 p-2 bg-teal-600 text-white rounded-full cursor-pointer shadow-lg hover:bg-teal-700 transition-colors">
+              <Camera size={16} />
+              <input type="file" accept="image/*" className="hidden" onChange={handlePhotoUpload} />
+            </label>
+          </div>
+          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">Tamanho máximo: 4 Mb</span>
+        </div>
+
+        {/* Basic Info Section */}
+        <div className="flex-1 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Input 
+              label="Nome conforme documento (Obrigatório):" 
+              required 
+              value={formData.name} 
+              onChange={e => setFormData({...formData, name: e.target.value})} 
+              placeholder="Ex: Adail Neto"
+            />
+            <Input 
+              label="Data de Aniversário:" 
+              type="date" 
+              value={formData.birthDate} 
+              onChange={e => setFormData({...formData, birthDate: e.target.value})} 
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">Celular:</label>
+              <div className="flex gap-2">
+                <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-md shrink-0">
+                  <img src="https://flagcdn.com/w20/br.png" alt="BR" className="w-5 h-auto rounded-sm" />
+                  <span className="text-sm font-bold text-slate-600">+55</span>
+                </div>
+                <Input 
+                  value={formData.phone} 
+                  onChange={e => setFormData({...formData, phone: e.target.value})} 
+                  placeholder="(00) 00000-0000"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">Telefone:</label>
+              <div className="flex gap-2">
+                <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-md shrink-0">
+                  <img src="https://flagcdn.com/w20/br.png" alt="BR" className="w-5 h-auto rounded-sm" />
+                  <span className="text-sm font-bold text-slate-600">+55</span>
+                </div>
+                <Input 
+                  value={formData.secondaryPhone} 
+                  onChange={e => setFormData({...formData, secondaryPhone: e.target.value})} 
+                  placeholder="(00) 0000-0000"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+             <label className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">Gênero:</label>
+             <div className="flex flex-wrap gap-4">
+                {['Masculino', 'Feminino', 'Outro', 'Prefiro não dizer'].map((g) => (
+                  <label key={g} className="flex items-center gap-2 cursor-pointer group">
+                    <input 
+                      type="radio" 
+                      name="gender" 
+                      value={g} 
+                      checked={formData.gender === g}
+                      onChange={() => setFormData({...formData, gender: g as any})}
+                      className="w-4 h-4 accent-teal-600"
+                    />
+                    <span className="text-sm text-slate-600 group-hover:text-teal-600 transition-colors font-medium">{g}</span>
+                  </label>
+                ))}
+             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
         <Input 
-          label="Telefone" 
-          required 
-          value={formData.phone} 
-          onChange={e => setFormData({...formData, phone: e.target.value})} 
+          label="CPF:" 
+          value={formData.cpf} 
+          onChange={e => setFormData({...formData, cpf: e.target.value})} 
+          placeholder="000.000.000-00"
         />
         <Input 
-          label="Data de Nascimento" 
-          type="date" 
-          value={formData.birthDate} 
-          onChange={e => setFormData({...formData, birthDate: e.target.value})} 
+          label="RG:" 
+          value={formData.rg} 
+          onChange={e => setFormData({...formData, rg: e.target.value})} 
+          placeholder="0.000.000"
         />
       </div>
-      <Input 
-        label="Email" 
-        type="email" 
-        value={formData.email} 
-        onChange={e => setFormData({...formData, email: e.target.value})} 
-      />
-      <Input 
-        label="Endereço" 
-        value={formData.address} 
-        onChange={e => setFormData({...formData, address: e.target.value})} 
-      />
-      <Button type="submit" disabled={loading} className="w-full">
-        {loading ? 'Salvando...' : 'Cadastrar Cliente'}
-      </Button>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <Input 
+          label="E-mail:" 
+          type="email"
+          value={formData.email} 
+          onChange={e => setFormData({...formData, email: e.target.value})} 
+        />
+        <Input 
+          label="CEP:" 
+          value={formData.cep} 
+          onChange={e => setFormData({...formData, cep: e.target.value})} 
+        />
+        <Input 
+          label="Endereço:" 
+          value={formData.address} 
+          onChange={e => setFormData({...formData, address: e.target.value})} 
+        />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <Input 
+          label="Estado:" 
+          value={formData.state} 
+          onChange={e => setFormData({...formData, state: e.target.value})} 
+        />
+        <Input 
+          label="Cidade:" 
+          value={formData.city} 
+          onChange={e => setFormData({...formData, city: e.target.value})} 
+        />
+        <Input 
+          label="Bairro:" 
+          value={formData.neighborhood} 
+          onChange={e => setFormData({...formData, neighborhood: e.target.value})} 
+        />
+      </div>
+
+      <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
+        <Button onClick={onSuccess} variant="outline" type="button">Cancelar</Button>
+        <Button type="submit" disabled={loading} className="px-12 bg-indigo-600 hover:bg-indigo-700">
+          {loading ? 'Salvando...' : 'Salvar'}
+        </Button>
+      </div>
     </form>
   );
 }
@@ -873,8 +1223,11 @@ export function AnamnesisForm({ client, initialData, onSuccess }: { client: Clie
 }
 
 // --- Command (Comanda) Form ---
-export function CommandForm({ client, initialServices, initialCommand, onSuccess }: { client: Client, initialServices?: Service[], initialCommand?: Command, onSuccess: () => void }) {
+export function CommandForm({ client, initialServices, initialCommand, appointmentId, onSuccess }: { client: Client, initialServices?: Service[], initialCommand?: Command, appointmentId?: string | null, onSuccess: () => void }) {
   const [loading, setLoading] = useState(false);
+  const [guestName, setGuestName] = useState(client.id === 'guest' && client.name !== 'Cliente Avulso' ? client.name : '');
+  const [guestPhone, setGuestPhone] = useState(client.id === 'guest' ? client.phone : '');
+  const [registerGuest, setRegisterGuest] = useState(false);
   const [services, setServices] = useState<Service[]>(
     initialCommand ? initialCommand.services : 
     (initialServices && initialServices.length > 0 ? initialServices : [{ name: '', price: 0 }])
@@ -923,10 +1276,12 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
       }
     }
 
-    // Rough calculation for UI, will be precise on save
+    // Rough calculation for UI, considering fees if already selected
     const price = Number(service.price) || 0;
+    const feeRate = getFeeRate();
+    const netPrice = price * (1 - feeRate / 100);
     const rate = Number(service.commissionRate) || 0;
-    service.commissionValue = (price * rate) / 100;
+    service.commissionValue = (netPrice * rate) / 100;
 
     newServices[index] = service;
     setServices(newServices);
@@ -938,7 +1293,15 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
     if (!settings || !settings.fees) return 0;
     const fees = settings.fees;
 
-    if (paymentMethod === 'Cartão de Débito') return fees.debit || 0;
+    if (paymentMethod === 'Cartão de Débito') {
+      const isVisaMaster = cardBrand === 'Visa' || cardBrand === 'Mastercard';
+      const isEloAmex = cardBrand === 'Elo' || cardBrand === 'Amex' || cardBrand === 'Hipercard';
+      
+      if (isVisaMaster) return fees.debitVisaMaster || 0;
+      if (isEloAmex) return fees.debitEloAmex || 0;
+      return fees.debitVisaMaster || 0; // Default
+    }
+
     if (paymentMethod === 'Link de Pagamento') return fees.paymentLink?.[installments - 1] || 0;
     
     if (paymentMethod === 'Cartão de Crédito') {
@@ -947,6 +1310,7 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
       
       if (isVisaMaster) return fees.creditVisaMaster?.[installments - 1] || 0;
       if (isEloAmex) return fees.creditEloAmex?.[installments - 1] || 0;
+      return fees.creditVisaMaster?.[installments - 1] || 0; // Default
     }
 
     return 0;
@@ -956,10 +1320,20 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
     const feeRate = getFeeRate();
     const feeAmount = (total * feeRate) / 100;
     const updatedServices = services.map(s => {
-      const proportionalFee = total > 0 ? (s.price / total) * feeAmount : 0;
-      const netPrice = s.price - proportionalFee;
-      const commissionValue = (netPrice * (s.commissionRate || 0)) / 100;
-      return { ...s, netPrice, commissionValue };
+      const currentPrice = Number(s.price) || 0;
+      const proportionalFee = total > 0 ? (currentPrice / total) * feeAmount : 0;
+      const netPrice = currentPrice - proportionalFee;
+      
+      // Look up commission rate if missing but professional exists
+      let rate = Number(s.commissionRate);
+      if ((isNaN(rate) || rate === 0) && s.professionalId) {
+        const pro = professionals.find(p => p.id === s.professionalId);
+        if (pro) rate = pro.defaultCommission;
+      }
+      if (isNaN(rate)) rate = 0;
+
+      const commissionValue = (netPrice * rate) / 100;
+      return { ...s, netPrice, commissionRate: rate, commissionValue };
     });
     return { updatedServices, feeAmount, netTotal: total - feeAmount };
   };
@@ -967,15 +1341,35 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (total <= 0) return alert('Adicione pelo menos um serviço');
+    if (client.id === 'guest' && !guestName.trim()) return alert('Informe o nome do cliente');
     
     setLoading(true);
     const path = 'commands';
     const { updatedServices, feeAmount, netTotal } = calculateCommissions();
 
     try {
-      const commandData = {
-        clientId: client.id,
-        clientName: client.name,
+      let finalClientId = client.id;
+      let finalClientName = client.name;
+
+      if (client.id === 'guest') {
+        finalClientName = guestName;
+        if (registerGuest) {
+          try {
+            const clientRef = await addDoc(collection(db, 'clients'), {
+              name: guestName,
+              phone: guestPhone,
+              createdAt: serverTimestamp(),
+            });
+            finalClientId = clientRef.id;
+          } catch (err) {
+            console.error("Erro ao pré-cadastrar cliente:", err);
+          }
+        }
+      }
+
+      const commandData: any = {
+        clientId: finalClientId,
+        clientName: finalClientName,
         services: updatedServices,
         total,
         feeAmount,
@@ -985,13 +1379,64 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
         cardBrand: (isCard && cardBrand) ? cardBrand : null,
         installments: isCredit ? (installments || 1) : 1,
         date: initialCommand ? initialCommand.date : serverTimestamp(),
+        updatedAt: serverTimestamp(),
       };
 
+      // Add closing time if status is paid and it was not paid before
+      if (status === 'paid' && (!initialCommand || initialCommand.status !== 'paid')) {
+        commandData.closedAt = serverTimestamp();
+      } else if (initialCommand && initialCommand.closedAt) {
+        commandData.closedAt = initialCommand.closedAt;
+      }
+
+      let commandId = initialCommand?.id;
       if (initialCommand) {
         await setDoc(doc(db, path, initialCommand.id), commandData, { merge: true });
       } else {
-        await addDoc(collection(db, path), commandData);
+        const docRef = await addDoc(collection(db, path), commandData);
+        commandId = docRef.id;
+        
+        // If it came from an appointment, mark as attended
+        if (appointmentId) {
+          try {
+            await updateDoc(doc(db, 'appointments', appointmentId), {
+              status: 'attended'
+            });
+          } catch (err) {
+            console.error("Erro ao atualizar status do agendamento:", err);
+          }
+        }
       }
+
+      // Sync professional transactions
+      if (commandId) {
+        try {
+          const q = query(collection(db, 'professional_transactions'), where('commandId', '==', commandId));
+          const snapshots = await getDocs(q);
+          const batch = writeBatch(db);
+          snapshots.forEach((d) => batch.delete(d.ref));
+
+          if (status === 'paid') {
+            updatedServices.forEach(s => {
+              if (s.professionalId && (s.commissionValue || 0) > 0) {
+                const transRef = doc(collection(db, 'professional_transactions'));
+                batch.set(transRef, {
+                  professionalId: s.professionalId,
+                  type: 'commission',
+                  amount: s.commissionValue,
+                  date: commandData.date,
+                  notes: `Comissão: ${s.name} (Ref: ${finalClientName})`,
+                  commandId: commandId
+                });
+              }
+            });
+          }
+          await batch.commit();
+        } catch (transErr) {
+          console.error("Erro ao sincronizar transações do profissional:", transErr);
+        }
+      }
+
       onSuccess();
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
@@ -1003,6 +1448,10 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
   const isCard = paymentMethod === 'Cartão de Crédito' || paymentMethod === 'Cartão de Débito';
   const isCredit = paymentMethod === 'Cartão de Crédito' || paymentMethod === 'Link de Pagamento';
 
+  const { updatedServices, feeAmount, netTotal } = calculateCommissions();
+  const totalCommission = updatedServices.reduce((acc, s) => acc + (s.commissionValue || 0), 0);
+  const netBalance = netTotal - totalCommission;
+
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div className="space-y-4">
@@ -1013,8 +1462,52 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
           </Button>
         </div>
 
+        {client.id === 'guest' && (
+          <div className="bg-slate-800/30 p-4 rounded-2xl border border-white/5 space-y-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Zap size={14} className="text-amber-400" />
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Cliente Não Cadastrado</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">Nome do Cliente</label>
+                <input 
+                  type="text" 
+                  value={guestName}
+                  onChange={e => setGuestName(e.target.value)}
+                  placeholder="Informe o nome..."
+                  className="w-full h-10 px-3 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm outline-none focus:ring-1 focus:ring-teal-500"
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">Telefone (Opcional)</label>
+                <input 
+                  type="text" 
+                  value={guestPhone}
+                  onChange={e => setGuestPhone(e.target.value)}
+                  placeholder="(00) 00000-0000"
+                  className="w-full h-10 px-3 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm outline-none focus:ring-1 focus:ring-teal-500"
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-3 p-3 bg-slate-900/50 rounded-xl border border-white/5 cursor-pointer hover:bg-slate-900 transition-colors">
+              <input 
+                type="checkbox" 
+                checked={registerGuest}
+                onChange={e => setRegisterGuest(e.target.checked)}
+                className="w-4 h-4 accent-teal-500 rounded"
+              />
+              <div>
+                <p className="text-xs font-bold text-white">Cadastrar cliente na base</p>
+                <p className="text-[10px] text-slate-500">Isso criará uma ficha de cliente automaticamente após salvar.</p>
+              </div>
+            </label>
+          </div>
+        )}
+
         <div className="space-y-3 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-          {services.map((service, index) => (
+          {updatedServices.map((service, index) => (
             <div key={index} className="bg-slate-800/50 p-4 rounded-2xl border border-white/5 space-y-4 animate-in slide-in-from-right-2 duration-300">
               <div className="flex gap-3">
                 <div className="flex-1 space-y-1.5">
@@ -1156,19 +1649,59 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
           </div>
         )}
 
-        <div className="p-6 bg-gradient-to-br from-teal-500/20 to-emerald-500/20 border border-teal-500/30 rounded-3xl flex justify-between items-center shadow-inner relative overflow-hidden group">
+        <div className="p-6 bg-gradient-to-br from-teal-500/20 to-emerald-500/20 border border-teal-500/30 rounded-3xl flex flex-col gap-4 shadow-inner relative overflow-hidden group">
           <div className="absolute top-0 right-0 w-32 h-32 bg-teal-500/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-2xl group-hover:bg-teal-500/20 transition-all duration-500" />
-          <div className="relative z-10">
-            <span className="font-bold text-teal-400 uppercase text-[10px] tracking-[0.25em]">Subtotal do Atendimento</span>
-            <div className="flex items-baseline gap-1 mt-1">
-              <span className="text-4xl font-bold font-mono text-white tracking-tighter">
-                {formatCurrency(total)}
-              </span>
+          
+          <div className="flex justify-between items-center relative z-10">
+            <div>
+              <span className="font-bold text-teal-400 uppercase text-[10px] tracking-[0.25em]">Subtotal do Atendimento</span>
+              <div className="flex items-baseline gap-1 mt-1">
+                <span className="text-4xl font-bold font-mono text-white tracking-tighter">
+                  {formatCurrency(total)}
+                </span>
+              </div>
+            </div>
+            <div className="flex flex-col items-end">
+              <DollarSign className="text-teal-400/30 mb-2" size={32} strokeWidth={1.5} />
+              <div className="h-1 w-12 bg-teal-500/50 rounded-full" />
             </div>
           </div>
-          <div className="relative z-10 flex flex-col items-end">
-            <DollarSign className="text-teal-400/30 mb-2" size={32} strokeWidth={1.5} />
-            <div className="h-1 w-12 bg-teal-500/50 rounded-full" />
+
+          <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5 relative z-10">
+            <div>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Taxas Operacionais</p>
+              <p className="text-lg font-bold text-rose-500 font-mono">
+                {formatCurrency(feeAmount)}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Saldo Líquido</p>
+              <p className="text-lg font-bold text-white font-mono">
+                {formatCurrency(netTotal)}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5 relative z-10">
+            <div>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Total Comissões</p>
+              <p className="text-lg font-bold text-teal-500 font-mono">
+                {formatCurrency(totalCommission)}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Saldo Clínica</p>
+              <p className="text-lg font-bold text-white font-mono">
+                {formatCurrency(netBalance)}
+              </p>
+            </div>
+          </div>
+
+          <div className="text-center pt-2 relative z-10">
+            <p className="text-[10px] text-slate-500 flex items-center justify-center gap-1.5">
+              <Clock size={12} className="text-teal-500" />
+              Fechamento em: <span className="text-white font-bold">{new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+            </p>
           </div>
         </div>
 
@@ -1188,13 +1721,6 @@ export function CommandForm({ client, initialServices, initialCommand, onSuccess
 // --- Professional Form ---
 export function ProfessionalForm({ onSuccess }: { onSuccess: () => void }) {
   const [loading, setLoading] = useState(false);
-  const [formData, setFormData] = useState({ 
-    name: '', 
-    defaultCommission: 0,
-    color: '#0d9488'
-  });
-  const [success, setSuccess] = useState(false);
-
   const CALENDAR_COLORS = [
     '#0d9488', // Teal
     '#3b82f6', // Blue
@@ -1205,6 +1731,15 @@ export function ProfessionalForm({ onSuccess }: { onSuccess: () => void }) {
     '#ef4444', // Red
     '#6366f1', // Indigo
   ];
+  const [formData, setFormData] = useState({ 
+    name: '', 
+    defaultCommission: 0,
+    color: CALENDAR_COLORS[0],
+    email: '',
+    phone: '',
+    password: ''
+  });
+  const [success, setSuccess] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1212,7 +1747,6 @@ export function ProfessionalForm({ onSuccess }: { onSuccess: () => void }) {
     setSuccess(false);
     const path = 'professionals';
     try {
-      console.log('Tentando cadastrar profissional:', formData);
       await addDoc(collection(db, path), {
         ...formData,
         updatedAt: serverTimestamp()
@@ -1220,13 +1754,15 @@ export function ProfessionalForm({ onSuccess }: { onSuccess: () => void }) {
       setFormData({ 
         name: '', 
         defaultCommission: 0,
-        color: '#0d9488'
+        color: CALENDAR_COLORS[0],
+        email: '',
+        phone: '',
+        password: ''
       });
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
       onSuccess();
     } catch (error) {
-      console.error('Erro ao cadastrar profissional:', error);
       handleFirestoreError(error, OperationType.CREATE, path);
     } finally {
       setLoading(false);
@@ -1240,24 +1776,48 @@ export function ProfessionalForm({ onSuccess }: { onSuccess: () => void }) {
           Profissional cadastrado com sucesso!
         </div>
       )}
-      <Input 
-        label="Nome do Profissional" 
-        required 
-        value={formData.name} 
-        onChange={e => setFormData({ ...formData, name: e.target.value })} 
-        placeholder="Ex: Dra. Ana Silva"
-      />
-      <Input 
-        label="Comissão Padrão (%)" 
-        type="text" 
-        required 
-        value={formData.defaultCommission || ''} 
-        onChange={e => {
-          const val = e.target.value.replace(',', '.');
-          setFormData({ ...formData, defaultCommission: parseFloat(val) || 0 });
-        }} 
-        placeholder="Ex: 50"
-      />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Input 
+          label="Nome do Profissional" 
+          required 
+          value={formData.name} 
+          onChange={e => setFormData({ ...formData, name: e.target.value })} 
+          placeholder="Ex: Dra. Ana Silva"
+        />
+        <Input 
+          label="E-mail de Acesso (Google)" 
+          type="email"
+          value={formData.email} 
+          onChange={e => setFormData({ ...formData, email: e.target.value })} 
+          placeholder="email@gmail.com"
+        />
+        <Input 
+          label="Celular para Acesso" 
+          value={formData.phone} 
+          onChange={e => setFormData({ ...formData, phone: e.target.value })} 
+          placeholder="Ex: 11999999999"
+        />
+        <Input 
+          label="Senha de Acesso" 
+          type="password"
+          value={formData.password} 
+          onChange={e => setFormData({ ...formData, password: e.target.value })} 
+          placeholder="Mínimo 6 caracteres"
+        />
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Input 
+          label="Comissão Padrão (%)" 
+          type="text" 
+          required 
+          value={formData.defaultCommission || ''} 
+          onChange={e => {
+            const val = e.target.value.replace(',', '.');
+            setFormData({ ...formData, defaultCommission: parseFloat(val) || 0 });
+          }} 
+          placeholder="Ex: 50"
+        />
+      </div>
       <p className="text-[10px] text-slate-400 italic">Esta comissão será sugerida automaticamente ao criar novas comandas.</p>
       
       <div className="space-y-3">
@@ -1897,6 +2457,7 @@ export function LocationForm({ onSuccess }: { onSuccess: () => void }) {
   const [formData, setFormData] = useState({
     name: '',
     address: '',
+    mapsUrl: '',
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1908,7 +2469,7 @@ export function LocationForm({ onSuccess }: { onSuccess: () => void }) {
         ...formData,
         updatedAt: serverTimestamp(),
       });
-      setFormData({ name: '', address: '' });
+      setFormData({ name: '', address: '', mapsUrl: '' });
       onSuccess();
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, path);
@@ -1930,6 +2491,12 @@ export function LocationForm({ onSuccess }: { onSuccess: () => void }) {
         value={formData.address} 
         onChange={e => setFormData({...formData, address: e.target.value})} 
       />
+      <Input 
+        label="Link do Google Maps (Opcional)" 
+        value={formData.mapsUrl} 
+        onChange={e => setFormData({...formData, mapsUrl: e.target.value})} 
+        placeholder="https://goo.gl/maps/..."
+      />
       <Button type="submit" disabled={loading} className="w-full shadow-md shadow-teal-500/10">
         {loading ? 'Processando...' : 'Cadastrar Unidade'}
       </Button>
@@ -1938,20 +2505,20 @@ export function LocationForm({ onSuccess }: { onSuccess: () => void }) {
 }
 
 // --- Professional Transaction Form (Vale / Pagamento) ---
-export function ProfessionalTransactionForm({ professionalId, type, onSuccess }: { professionalId: string, type: 'payment' | 'advance', onSuccess: () => void }) {
+export function ProfessionalTransactionForm({ professionalId, type, balance = 0, onSuccess }: { professionalId: string, type: 'payment' | 'advance', balance?: number, onSuccess: () => void }) {
   const [loading, setLoading] = useState(false);
+  const [amount, setAmount] = useState<string>('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const formData = new FormData(e.currentTarget as HTMLFormElement);
     setLoading(true);
     
     try {
       await addDoc(collection(db, 'professional_transactions'), {
         professionalId,
         type,
-        amount: parseFloat(formData.get('amount') as string) || 0,
-        notes: formData.get('notes') as string || '',
+        amount: parseFloat(amount) || 0,
+        notes: (e.currentTarget as HTMLFormElement).notes.value || '',
         date: serverTimestamp()
       });
       onSuccess();
@@ -1966,9 +2533,20 @@ export function ProfessionalTransactionForm({ professionalId, type, onSuccess }:
     <form onSubmit={handleSubmit} className="space-y-6">
       <div className="space-y-4">
         <div>
-          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">
-            Valor do {type === 'advance' ? 'Vale' : 'Pagamento'}
-          </label>
+          <div className="flex justify-between items-center mb-1 ml-1">
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+              Valor do {type === 'advance' ? 'Vale' : 'Pagamento'}
+            </label>
+            {type === 'payment' && balance > 0 && (
+              <button 
+                type="button"
+                onClick={() => setAmount(balance.toFixed(2))}
+                className="text-[10px] font-bold text-teal-500 hover:text-teal-400 uppercase tracking-widest bg-teal-500/10 px-2 py-0.5 rounded cursor-pointer"
+              >
+                Pagar Total: {formatCurrency(balance)}
+              </button>
+            )}
+          </div>
           <div className="relative mt-1">
             <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
             <Input 
@@ -1976,6 +2554,8 @@ export function ProfessionalTransactionForm({ professionalId, type, onSuccess }:
               type="number" 
               step="0.01" 
               required 
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
               placeholder="0,00"
               className="pl-10 h-12 bg-slate-800 border-slate-700 text-white focus:ring-teal-500"
             />
@@ -1999,6 +2579,93 @@ export function ProfessionalTransactionForm({ professionalId, type, onSuccess }:
         )}
       >
         {loading ? "Processando..." : `Confirmar ${type === 'advance' ? 'Vale' : 'Pagamento'}`}
+      </Button>
+    </form>
+  );
+}
+
+// --- Professional Login Form ---
+export function ProfessionalLoginForm({ onLogin }: { onLogin: (pro: Professional) => void }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    try {
+      if (!auth.currentUser) {
+        await signInAnonymously(auth);
+      }
+
+      const q = query(
+        collection(db, 'professionals'), 
+        where('phone', '==', phone.trim()),
+        where('password', '==', password)
+      );
+      
+      const snap = await getDocs(q);
+      
+      if (!snap.empty) {
+        const pro = { id: snap.docs[0].id, ...snap.docs[0].data() } as Professional;
+        onLogin(pro);
+      } else {
+        setError('Celular ou senha incorretos.');
+      }
+    } catch (err) {
+      console.error('Login error:', err);
+      setError('Erro ao realizar login. Tente novamente.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleLogin} className="space-y-4">
+      {error && (
+        <div className="p-3 bg-red-50 text-red-600 rounded-xl text-xs font-bold border border-red-100 flex items-center gap-2">
+          <XCircle size={14} /> {error}
+        </div>
+      )}
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Número de Celular</label>
+          <div className="relative">
+            <MessageCircle size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input 
+              type="text" 
+              value={phone}
+              onChange={e => setPhone(e.target.value)}
+              placeholder="Ex: 11999999999"
+              className="w-full h-12 pl-10 pr-4 bg-white border border-slate-200 rounded-xl text-slate-900 text-sm outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-500 transition-all font-medium"
+              required
+            />
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Senha de Acesso</label>
+          <div className="relative">
+            <Zap size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input 
+              type="password" 
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full h-12 pl-10 pr-4 bg-white border border-slate-200 rounded-xl text-slate-900 text-sm outline-none focus:ring-2 focus:ring-teal-100 focus:border-teal-500 transition-all font-medium"
+              required
+            />
+          </div>
+        </div>
+      </div>
+      <Button 
+        type="submit" 
+        disabled={loading}
+        className="w-full h-12 bg-slate-900 hover:bg-slate-800 text-white shadow-lg shadow-slate-200"
+      >
+        {loading ? 'Autenticando...' : 'Acessar Painel Colaborador'}
       </Button>
     </form>
   );

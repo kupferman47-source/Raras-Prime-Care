@@ -91,8 +91,22 @@ export function Input(props: {
   );
 }
 
-export function Modal({ isOpen, onClose, title, children }: { isOpen: boolean, onClose: () => void, title: string, children: React.ReactNode }) {
+export function Modal({ isOpen, onClose, title, children, size = 'md' }: { 
+  isOpen: boolean, 
+  onClose: () => void, 
+  title: string, 
+  children: React.ReactNode,
+  size?: 'sm' | 'md' | 'lg' | 'xl' | 'full'
+}) {
   if (!isOpen) return null;
+
+  const sizes = {
+    sm: "max-w-md",
+    md: "max-w-lg",
+    lg: "max-w-2xl",
+    xl: "max-w-4xl",
+    full: "max-w-[95vw]"
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -100,7 +114,7 @@ export function Modal({ isOpen, onClose, title, children }: { isOpen: boolean, o
         className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity" 
         onClick={onClose} 
       />
-      <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl z-10 relative overflow-hidden animate-in zoom-in-95 duration-200">
+      <div className={cn("bg-white rounded-3xl w-full shadow-2xl z-10 relative overflow-hidden animate-in zoom-in-95 duration-200", sizes[size])}>
         <div className="p-6 border-b border-slate-100 flex items-center justify-between">
           <h3 className="text-xl font-bold text-slate-800">{title}</h3>
           <button 

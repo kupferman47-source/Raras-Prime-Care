@@ -5,10 +5,15 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatDate(date: string | Date) {
+export function formatDate(date: any) {
   if (!date) return '';
-  const d = new Date(date);
-  return d.toLocaleDateString('pt-BR');
+  try {
+    const d = date.toDate ? date.toDate() : new Date(date);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('pt-BR');
+  } catch (e) {
+    return '';
+  }
 }
 
 export function formatCurrency(value: number) {

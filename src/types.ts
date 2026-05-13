@@ -2,11 +2,24 @@ export interface Client {
   id: string;
   name: string;
   phone: string;
+  secondaryPhone?: string;
   email?: string;
   birthDate: string;
   address: string;
+  gender?: 'Masculino' | 'Feminino' | 'Outro' | 'Prefiro não dizer';
+  cpf?: string;
+  rg?: string;
+  cep?: string;
+  state?: string;
+  city?: string;
+  neighborhood?: string;
+  avatarUrl?: string;
   legacyHistory?: string;
+  lastBirthdayMessageSentDate?: string;
+  isDeleted?: boolean;
+  deletedAt?: any;
   createdAt: any;
+  updatedAt?: any;
 }
 
 export interface Anamnesis {
@@ -81,6 +94,17 @@ export interface Professional {
   name: string;
   defaultCommission: number;
   color?: string;
+  email?: string;
+  phone?: string;
+  password?: string;
+}
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  role: 'admin' | 'professional';
+  professionalId?: string;
+  createdAt: any;
 }
 
 export interface RegisteredService {
@@ -95,6 +119,7 @@ export interface ClinicBranch {
   id: string;
   name: string;
   address?: string;
+  mapsUrl?: string;
   updatedAt: any;
 }
 
@@ -112,6 +137,8 @@ export interface Command {
   installments?: number;
   paymentLink?: string;
   date: any;
+  closedAt?: any;
+  updatedAt?: any;
 }
 
 export interface EvolutionEntry {
@@ -128,16 +155,18 @@ export interface EvolutionEntry {
 export interface ProfessionalTransaction {
   id: string;
   professionalId: string;
-  type: 'payment' | 'advance'; // advance = vale
+  type: 'payment' | 'advance' | 'commission'; // advance = vale, commission = from commands
   amount: number;
   date: any;
   notes?: string;
+  commandId?: string; // Reference to the command that generated this
 }
 
 export interface AppSettings {
   backupEmail: string;
   fees?: {
-    debit: number;
+    debitVisaMaster: number;
+    debitEloAmex: number;
     creditVisaMaster: number[];
     creditEloAmex: number[];
     paymentLink: number[];
@@ -162,5 +191,17 @@ export interface Appointment {
   paymentMethod?: 'Dinheiro' | 'Pix' | 'Cartão de Crédito' | 'Cartão de Débito';
   status: 'scheduled' | 'confirmed' | 'cancelled' | 'attended';
   notes?: string;
+  createdAt: any;
+}
+
+export interface Feedback {
+  id: string;
+  appointmentId: string;
+  clientId: string;
+  clientName: string;
+  professionalId: string;
+  professionalName: string;
+  rating: number;
+  comment?: string;
   createdAt: any;
 }
