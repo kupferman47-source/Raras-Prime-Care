@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    // Since this is a private management app for the clinic owner/staff
+    // We strictly allow access only to authenticated and verified users.
+    // In a real scenario, we might want to check for a specific email or role.
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    match /clients/{clientId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /anamnesis/{anamnesisId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /commands/{commandId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /settings/{settingId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /clients/{clientId}/evolution/{evolutionId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /professionals/{professionalId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /services_catalog/{serviceId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /appointments/{appointmentId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /locations/{locationId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /professional_transactions/{transactionId} {
+      allow read, write: if isSignedIn() && isEmailVerified();
+    }
+  }
+}

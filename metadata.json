@@ -1,0 +1,6 @@
+{
+  "name": "Raras Prime Care",
+  "description": "Sistema completo para clínicas de estética e bem-estar com ficha de anamnese, agenda inteligente, cadastro de clientes e controle financeiro.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}

@@ -1,0 +1,256 @@
+{
+  "entities": {
+    "client": {
+      "title": "Client",
+      "description": "Standard registration data for a clinic client.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Full name of the client" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "email": { "type": "string", "format": "email", "description": "Email address" },
+        "birthDate": { "type": "string", "description": "Birth date (YYYY-MM-DD)" },
+        "address": { "type": "string", "description": "Home address" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["name", "phone"]
+    },
+    "anamnesis": {
+      "title": "Anamnesis",
+      "description": "Podological assessment form.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string", "description": "ID of the associated client" },
+        "smoking": { "type": "boolean" },
+        "diabetes": { "type": "boolean" },
+        "hypertension": { "type": "boolean" },
+        "cardiacDisease": { "type": "boolean", "description": "Cardiac problems" },
+        "pacemaker": { "type": "boolean", "description": "Uses pacemaker" },
+        "anticoagulant": { "type": "boolean", "description": "Uses anticoagulant" },
+        "renalProblem": { "type": "boolean" },
+        "hepatitis": { "type": "boolean" },
+        "cancer": { "type": "boolean" },
+        "pregnancy": { "type": "boolean" },
+        "allergyMetals": { "type": "boolean" },
+        "mycosisNails": { "type": "boolean" },
+        "mycosisSkin": { "type": "boolean" },
+        "sports": { "type": "boolean", "description": "Practices sports" },
+        "painSensitivity": { "type": "boolean", "description": "Pain sensitivity" },
+        "leprosy": { "type": "boolean", "description": "Leprosy history" },
+        "circulatoryDisorder": { "type": "boolean", "description": "Circulatory disorder" },
+        "lowerLimbSurgery": { "type": "boolean", "description": "Lower limb surgery history" },
+        "shoeType": { "type": "string", "enum": ["Aberto", "Fechado"] },
+        "shoeSize": { "type": "string" },
+        "sockType": { "type": "string", "enum": ["Esportiva", "Social"] },
+        "footAssessmentLeft": { "type": "string" },
+        "footAssessmentRight": { "type": "string" },
+        "dermatologicalPathologies": { "type": "array", "items": { "type": "string" } },
+        "nailPathologies": { "type": "array", "items": { "type": "string" } },
+        "imageAuthorization": { "type": "boolean" },
+        "generalObservations": { "type": "string" },
+        "aids": { "type": "boolean", "description": "HIV/AIDS status" },
+        "signatureDataUrl": { "type": "string", "description": "Client digital signature as base64 image" },
+        "onicomicose": { "type": "boolean" },
+        "onicofose": { "type": "boolean" },
+        "orteses": { "type": "boolean" },
+        "ungueal": { "type": "boolean" },
+        "verrugaPlantar": { "type": "boolean" },
+        "fissuras": { "type": "boolean" },
+        "onicocriptose": { "type": "boolean" },
+        "onicogrifose": { "type": "boolean" },
+        "micoseUngeualMao": { "type": "boolean" },
+        "compromisedNailsHands": { "type": "array", "items": { "type": "string" }, "description": "List of compromised hand nails (e.g., 'H1-L', 'H2-R')" },
+        "compromisedNailsFeet": { "type": "array", "items": { "type": "string" }, "description": "List of compromised foot nails (e.g., 'F1-L', 'F5-R')" },
+        "medications": { "type": "string" },
+        "allergies": { "type": "string" },
+        "nailCondition": { "type": "string" },
+        "skinCondition": { "type": "string" },
+        "footType": { "type": "string" },
+        "sensibilityFoot": { "type": "string" },
+        "assessment": { "type": "string" },
+        "disclaimerAccepted": { "type": "boolean", "description": "Legal responsibility disclaimer accepted by client" },
+        "absenceTermAccepted": { "type": "boolean", "description": "Absence and returns term accepted by client" },
+        "isDeleted": { "type": "boolean", "description": "Flag for soft delete" },
+        "deletedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientId", "disclaimerAccepted", "absenceTermAccepted"]
+    },
+    "command": {
+      "title": "Command",
+      "description": "Service command for billing and history.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "services": { 
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "price": { "type": "number" },
+              "professionalId": { "type": "string" },
+              "professionalName": { "type": "string" },
+              "commissionRate": { "type": "number" },
+              "commissionValue": { "type": "number" }
+            }
+          }
+        },
+        "total": { "type": "number" },
+        "status": { "type": "string", "enum": ["open", "paid", "cancelled"] },
+        "paymentMethod": { "type": "string", "enum": ["Dinheiro", "Pix", "Cartão de Crédito", "Cartão de Débito", "Link de Pagamento"] },
+        "cardBrand": { "type": "string", "enum": ["Visa", "Mastercard", "Elo", "Amex"] },
+        "installments": { "type": "number", "minimum": 1, "maximum": 10 },
+        "paymentLink": { "type": "string", "description": "Generated payment link for the client" },
+        "date": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientId", "total", "status", "date"]
+    },
+    "settings": {
+      "title": "App Settings",
+      "description": "Global application configurations.",
+      "type": "object",
+      "properties": {
+        "backupEmail": { "type": "string", "format": "email", "description": "Email to receive copies of anamnesis" },
+        "fees": {
+          "type": "object",
+          "properties": {
+            "debit": { "type": "number", "description": "Fee for debit card" },
+            "creditVisaMaster": { 
+              "type": "array", 
+              "items": { "type": "number" },
+              "description": "Fees for Visa/Mastercard installments (1x to 10x)"
+            },
+            "creditEloAmex": { 
+              "type": "array", 
+              "items": { "type": "number" },
+              "description": "Fees for Elo/Amex installments (1x to 10x)"
+            },
+            "paymentLink": { 
+              "type": "array", 
+              "items": { "type": "number" },
+              "description": "Fees for payment link installments (1x to 10x)"
+            }
+          }
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "evolution": {
+      "title": "Evolution Entry",
+      "description": "A record of client treatment evolution.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" },
+        "images": { 
+          "type": "array", 
+          "items": { "type": "string", "description": "Base64 image data" } 
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientId", "date", "description"]
+    },
+    "professional": {
+      "title": "Professional",
+      "description": "Clinic professional/collaborator.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "defaultCommission": { "type": "number", "description": "Default commission percentage (0-100)" },
+        "color": { "type": "string", "description": "Hex color code for calendar representation" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "defaultCommission"]
+    },
+    "registeredService": {
+      "title": "Registered Service",
+      "description": "Available service offered by the clinic.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "defaultPrice": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "defaultPrice"]
+    },
+    "appointment": {
+      "title": "Appointment",
+      "description": "Scheduled clinic appointment.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "clientPhone": { "type": "string" },
+        "professionalId": { "type": "string" },
+        "professionalName": { "type": "string" },
+        "serviceName": { "type": "string" },
+        "locationId": { "type": "string" },
+        "locationName": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "duration": { "type": "number", "description": "Duration in minutes" },
+        "price": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["Dinheiro", "Pix", "Cartão de Crédito", "Cartão de Débito"] },
+        "status": { "type": "string", "enum": ["scheduled", "confirmed", "cancelled", "attended"] },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientId", "date", "status"]
+    },
+    "location": {
+      "title": "Location",
+      "description": "Clinic physical location.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name"]
+    }
+  },
+  "firestore": {
+    "clients": {
+      "schema": "client",
+      "description": "Collection of clinic clients"
+    },
+    "anamnesis": {
+      "schema": "anamnesis",
+      "description": "Podological assessments indexed by client ID"
+    },
+    "commands": {
+      "schema": "command",
+      "description": "Service commands and financial transactions"
+    },
+    "settings": {
+      "schema": "settings",
+      "description": "Global application settings"
+    },
+    "evolution": {
+      "schema": "evolution",
+      "description": "Client condition evolution tracking"
+    },
+    "professionals": {
+      "schema": "professional",
+      "description": "Clinic professionals and collaborators"
+    },
+    "services_catalog": {
+      "schema": "registeredService",
+      "description": "Catalog of services with default prices"
+    },
+    "appointments": {
+      "schema": "appointment",
+      "description": "Client scheduled appointments"
+    },
+    "locations": {
+      "schema": "location",
+      "description": "Clinic physical branch locations"
+    },
+    "professional_transactions": {
+      "schema": "ProfessionalTransaction",
+      "description": "Payments and advances for professionals"
+    }
+  }
+}
